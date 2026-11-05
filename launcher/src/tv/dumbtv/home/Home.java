@@ -64,7 +64,7 @@ public final class Home extends Activity {
     private final ExecutorService io = Executors.newSingleThreadExecutor();
     private final ExecutorService colorIo = Executors.newSingleThreadExecutor();
     private final ExecutorService recommendationIo = Executors.newSingleThreadExecutor();
-    private final ExecutorService artworkIo = Executors.newSingleThreadExecutor();
+    private final Recommendations.ArtworkLoader artworkIo = new Recommendations.ArtworkLoader();
     private final List<Row> recommendationRows = new ArrayList<>();
     private LinearLayout recommendationColumn;
     private TextView recommendationStatus;
@@ -857,19 +857,21 @@ public final class Home extends Activity {
                 artworkIo.execute(() -> {
                     if (!recommendationArtEnabled || generation != recommendationGeneration) {
                         item.artRequested = false;
+                        return true;
+                    }
+                    return Recommendations.cachedArt(this, item);
+                }, () -> {
+                    if (!recommendationArtEnabled || generation != recommendationGeneration) return;
+                    Recommendations.art(this, item);
+                }, () -> ui.post(() -> {
+                    if (isDestroyed() || !recommendationArtEnabled || generation != recommendationGeneration) {
+                        item.banner = null;
+                        item.artRequested = false;
                         return;
                     }
-                    Recommendations.art(this, item);
-                    ui.post(() -> {
-                        if (isDestroyed() || !recommendationArtEnabled || generation != recommendationGeneration) {
-                            item.banner = null;
-                            item.artRequested = false;
-                            return;
-                        }
-                        if (item.banner != null) recommendationArt.put(item.id, item);
-                        tile.invalidate();
-                    });
-                });
+                    if (item.banner != null) recommendationArt.put(item.id, item);
+                    tile.invalidate();
+                }));
             }
         }
     }

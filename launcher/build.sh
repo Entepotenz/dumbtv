@@ -62,6 +62,25 @@ WORK=$(mktemp -d "${TMPDIR:-/tmp}/dumbtv-home.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
 mkdir -p "$WORK/gen" "$WORK/classes" build
 
+BUILD_BRANCH=unknown
+BUILD_COMMIT=unknown
+BUILD_STATE=unknown
+if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  BUILD_BRANCH=$(git symbolic-ref --quiet --short HEAD || printf 'detached HEAD')
+  BUILD_COMMIT=$(git rev-parse --short=12 HEAD)
+  BUILD_STATE=clean
+  if [[ -n $(git status --porcelain --untracked-files=normal) ]]; then BUILD_STATE=dirty; fi
+fi
+BUILD_DATE=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
+printf -v BUILD_TEXT 'Build information\nVersion: %s (%s)\nBranch: %s\nCommit: %s\nWorking tree: %s\nBuilt: %s\nMinimum SDK: %s' \
+  "$VERSION_NAME" "$VERSION_CODE" "$BUILD_BRANCH" "$BUILD_COMMIT" "$BUILD_STATE" "$BUILD_DATE" "$MIN_SDK"
+BUILD_TEXT=${BUILD_TEXT//\\/\\\\}
+BUILD_TEXT=${BUILD_TEXT//\"/\\\"}
+BUILD_TEXT=${BUILD_TEXT//$'\n'/\\n}
+mkdir -p "$WORK/gen/tv/dumbtv/home"
+printf 'package tv.dumbtv.home;\nfinal class BuildInfo {\n    static final String TEXT = "%s";\n}\n' \
+  "$BUILD_TEXT" > "$WORK/gen/tv/dumbtv/home/BuildInfo.java"
+
 "$BT/aapt2" compile --dir res -o "$WORK/res.zip"
 "$BT/aapt2" link -I "$JAR" --manifest AndroidManifest.xml "$WORK/res.zip" \
   --min-sdk-version "$MIN_SDK" --target-sdk-version 28 \

@@ -9,18 +9,30 @@ import android.graphics.BitmapFactory;
 import android.graphics.drawable.BitmapDrawable;
 import android.net.Uri;
 import android.os.Build;
+import android.util.Log;
 
 import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.function.BooleanSupplier;
 
 final class Recommendations {
     static final String PERMISSION = "android.permission.READ_TV_LISTINGS";
@@ -150,11 +162,177 @@ final class Recommendations {
         return source + (detail.trim().isEmpty() ? "" : " - " + detail.trim());
     }
 
+    static final class ArtworkCache {
+        static final long MAX_AGE = 7L * 24 * 60 * 60 * 1000;
+        static final long MAX_SIZE = 32L * 1024 * 1024;
+        private final File directory;
+
+        ArtworkCache(File root) {
+            directory = new File(root, "recommendation-art-v1");
+        }
+
+        File entry(String owner, String poster) {
+            try {
+                byte[] digest = MessageDigest.getInstance("SHA-256")
+                        .digest((owner + "\n" + poster).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                StringBuilder name = new StringBuilder();
+                for (byte value : digest) {
+                    name.append(Character.forDigit((value & 255) >>> 4, 16));
+                    name.append(Character.forDigit(value & 15, 16));
+                }
+                return new File(directory, name.toString());
+            } catch (NoSuchAlgorithmException error) {
+                throw new IllegalStateException(error);
+            }
+        }
+
+        byte[] read(File file) {
+            long age = System.currentTimeMillis() - file.lastModified();
+            if (age < 0 || age >= MAX_AGE || file.length() == 0 || file.length() > MAX_BYTES) {
+                file.delete();
+                return null;
+            }
+            try (InputStream input = new FileInputStream(file)) {
+                return readBytes(input);
+            } catch (IOException ignored) {
+                file.delete();
+                return null;
+            }
+        }
+
+        void write(File file, byte[] data) {
+            synchronized (ArtworkCache.class) {
+                store(file, data);
+            }
+        }
+
+        private void store(File file, byte[] data) {
+            if (data.length == 0 || data.length > MAX_BYTES) return;
+            File temporary = null;
+            try {
+                if (!directory.isDirectory() && !directory.mkdirs()) return;
+                temporary = File.createTempFile("art-", ".tmp", directory);
+                try (FileOutputStream output = new FileOutputStream(temporary)) {
+                    output.write(data);
+                }
+                if (!temporary.renameTo(file)) return;
+                trim();
+            } catch (IOException | RuntimeException ignored) {
+            } finally {
+                if (temporary != null) temporary.delete();
+            }
+        }
+
+        private void trim() {
+            File[] files = directory.listFiles();
+            if (files == null) return;
+            Arrays.sort(files, Comparator.comparingLong(File::lastModified));
+            long size = 0;
+            long now = System.currentTimeMillis();
+            for (File file : files) {
+                if (file.getName().endsWith(".tmp") || now - file.lastModified() >= MAX_AGE) file.delete();
+                else size += file.length();
+            }
+            for (File file : files) {
+                if (size <= MAX_SIZE) break;
+                long length = file.length();
+                if (file.delete()) size -= length;
+            }
+        }
+    }
+
+    private static byte[] readBytes(InputStream input) throws IOException {
+        try (ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            byte[] buffer = new byte[8192];
+            int count;
+            while ((count = input.read(buffer)) != -1) {
+                if (output.size() + count > MAX_BYTES || Thread.currentThread().isInterrupted()) return null;
+                output.write(buffer, 0, count);
+            }
+            return output.toByteArray();
+        }
+    }
+
+    private static boolean decodeArt(Context context, Item item, byte[] data) {
+        if (data == null) return false;
+        BitmapFactory.Options options = new BitmapFactory.Options();
+        options.inJustDecodeBounds = true;
+        BitmapFactory.decodeByteArray(data, 0, data.length, options);
+        if (options.outWidth <= 0 || options.outHeight <= 0) return false;
+        options.inSampleSize = 1;
+        while (options.outWidth / options.inSampleSize > 640
+                || options.outHeight / options.inSampleSize > 360) options.inSampleSize *= 2;
+        options.inJustDecodeBounds = false;
+        Bitmap bitmap = BitmapFactory.decodeByteArray(data, 0, data.length, options);
+        if (bitmap == null) return false;
+        item.banner = new BitmapDrawable(context.getResources(), bitmap);
+        return true;
+    }
+
+    static final class ArtworkLoader {
+        private final ExecutorService cacheIo = Executors.newSingleThreadExecutor();
+        private final ExecutorService sourceIo = Executors.newFixedThreadPool(2);
+
+        void execute(BooleanSupplier cached, Runnable source, Runnable completed) {
+            cacheIo.execute(() -> {
+                if (cached.getAsBoolean()) {
+                    completed.run();
+                    return;
+                }
+                try {
+                    sourceIo.execute(() -> {
+                        source.run();
+                        completed.run();
+                    });
+                } catch (RejectedExecutionException ignored) {
+                }
+            });
+        }
+
+        void shutdownNow() {
+            cacheIo.shutdownNow();
+            sourceIo.shutdownNow();
+        }
+    }
+
+    static boolean cachedArt(Context context, Item item) {
+        if (item.poster == null) return false;
+        long started = System.nanoTime();
+        try {
+            ArtworkCache cache = new ArtworkCache(context.getCacheDir());
+            File cached = cache.entry(item.owner, item.poster);
+            byte[] data = cache.read(cached);
+            if (data == null) return false;
+            if (decodeArt(context, item, data)) {
+                Log.i("RecommendationArt", "disk hit " + (System.nanoTime() - started) / 1000000 + "ms");
+                return true;
+            }
+            cached.delete();
+        } catch (RuntimeException ignored) {
+        }
+        return false;
+    }
+
     static void art(Context context, Item item) {
         if (item.poster == null) return;
+        long started = System.nanoTime();
+        String outcome = "source unavailable";
         HttpURLConnection connection = null;
         try {
             Uri uri = Uri.parse(item.poster);
+            String scheme = uri.getScheme();
+            if (!"content".equals(scheme) && !"android.resource".equals(scheme)
+                    && !"https".equals(scheme) && !"http".equals(scheme)) return;
+            ArtworkCache cache = new ArtworkCache(context.getCacheDir());
+            File cached = cache.entry(item.owner, item.poster);
+            byte[] stored = cache.read(cached);
+            if (stored != null) {
+                if (decodeArt(context, item, stored)) {
+                    outcome = "disk hit";
+                    return;
+                }
+                cached.delete();
+            }
             InputStream stream;
             if ("content".equals(uri.getScheme()) || "android.resource".equals(uri.getScheme())) {
                 stream = context.getContentResolver().openInputStream(uri);
@@ -168,28 +346,23 @@ final class Recommendations {
             } else return;
             if (stream == null) return;
             byte[] data;
-            try (InputStream input = stream; ByteArrayOutputStream output = new ByteArrayOutputStream()) {
-                byte[] buffer = new byte[8192];
-                int count;
-                while ((count = input.read(buffer)) != -1) {
-                    if (output.size() + count > MAX_BYTES || Thread.currentThread().isInterrupted()) return;
-                    output.write(buffer, 0, count);
-                }
-                data = output.toByteArray();
+            outcome = "source read failed";
+            try (InputStream input = stream) {
+                data = readBytes(input);
             }
-            BitmapFactory.Options options = new BitmapFactory.Options();
-            options.inJustDecodeBounds = true;
-            BitmapFactory.decodeByteArray(data, 0, data.length, options);
-            if (options.outWidth <= 0 || options.outHeight <= 0) return;
-            options.inSampleSize = 1;
-            while (options.outWidth / options.inSampleSize > 640
-                    || options.outHeight / options.inSampleSize > 360) options.inSampleSize *= 2;
-            options.inJustDecodeBounds = false;
-            Bitmap bitmap = BitmapFactory.decodeByteArray(data, 0, data.length, options);
-            if (bitmap != null) item.banner = new BitmapDrawable(context.getResources(), bitmap);
+            if (data == null) {
+                outcome = "source oversized or cancelled";
+                return;
+            }
+            outcome = "source decode failed";
+            if (decodeArt(context, item, data)) {
+                cache.write(cached, data);
+                outcome = cached.isFile() ? "source cached" : "source cache write failed";
+            }
         } catch (IOException | RuntimeException ignored) {
         } finally {
             if (connection != null) connection.disconnect();
+            Log.i("RecommendationArt", outcome + " " + (System.nanoTime() - started) / 1000000 + "ms");
         }
     }
 }

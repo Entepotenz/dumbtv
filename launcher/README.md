@@ -80,6 +80,12 @@ Below them: Next wallpaper, which apps and inputs appear on the home screen, a
 reset for order, names and hidden tiles, and **Open Amazon's home screen**. Apps
 without a TV banner, like the Appstore, start hidden; tick them to add them.
 
+At the bottom, a read-only **Build information** box shows the installed APK's
+version, Git branch and commit, clean/dirty working-tree state, UTC build date
+and minimum SDK. These values are captured by `build.sh`, not read from the TV.
+Dirty includes tracked changes and untracked files, but not ignored files.
+Builds without Git metadata show unknown; detached checkouts show detached HEAD.
+
 **Afterglow** changes app tiles only, in both rows and grid layouts. Select it in
 Options or set `tile_style=afterglow` in `home.conf`. The name remains visible inside
 each tile regardless of the App names setting; input tiles are unchanged.
@@ -119,7 +125,17 @@ root, private database access, scraping, direct Jellyfin server connection or
 Amazon account integration. Remote artwork requests contact the hosts supplied
 by the source apps, which can observe those requests. Locally provided Jellyfin
 artwork is read through Jellyfin's content provider. Images are size-limited,
-loaded off the UI thread for visible tiles, and cached within an 8 MiB budget.
+loaded off the UI thread for visible tiles, and cached within an 8 MiB RAM budget.
+Successfully decoded images also use a private disk cache of at most 32 MiB,
+shared across returns home and device restarts. Entries are keyed by the source
+app and artwork URI, expire after seven days, and the oldest are removed when
+the size limit is reached. Disk reads use a separate worker from the two source
+workers, so slow or oversized source images do not hold up cached covers. Local
+diagnostic logs record load outcomes and timings, never source URIs or accounts.
+Changed URIs load new artwork immediately; images
+changed at the same URI may remain cached until expiry. Missing, unreadable or
+invalid entries fall back to the original source. Android may reclaim the cache
+under storage pressure; clearing the launcher's cache in App info removes it too.
 The TV integration and deep links still need validation on the target Fire TV.
 
 | Grid layout | Adaptive background | Adaptive tint |

@@ -75,6 +75,19 @@ public final class Options extends Activity {
                 + "\nNo internet permission. No tracking, no ads, no accounts.");
         list.addView(about);
 
+            TextView build = Ui.text(this, 14, Ui.MUTED, Ui.MEDIUM);
+            build.setText(BuildInfo.TEXT);
+            build.setLineSpacing(0, 1.4f);
+            build.setPadding(dp(16), dp(16), dp(16), dp(16));
+            build.setFocusable(true);
+            LinearLayout.LayoutParams buildLayout = new LinearLayout.LayoutParams(dp(600), WRAP);
+            buildLayout.topMargin = dp(24);
+            build.setLayoutParams(buildLayout);
+            build.setBackground(Ui.round(0xFF18181C, dp(8)));
+            build.setOnFocusChangeListener((v, focused) -> build.setBackground(Ui.round(
+                focused ? (cfg.accent() & 0x00FFFFFF) | 0x33000000 : 0xFF18181C, dp(8))));
+            list.addView(build);
+
         setContentView(scroll);
         refresh();
     }
