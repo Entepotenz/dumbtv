@@ -11,6 +11,9 @@ final class Item {
     final Intent intent;
     ActivityInfo info;
     boolean leanback;
+    boolean recommendation;
+    String owner, subtitle, poster;
+    int progress;
     int state = -1;
     volatile boolean artRequested;
     volatile Drawable banner, icon;

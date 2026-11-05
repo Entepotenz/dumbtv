@@ -45,7 +45,7 @@ final class Tile extends View {
         boolean app = Catalog.APPS.equals(kind);
         afterglow = app && "afterglow".equals(Config.get(c).get(Config.TILE_STYLE))
                 ? new AfterglowTile(c, item.id, title, accent) : null;
-        labelH = app && afterglow == null ? Ui.dp(c, 26) : 0;
+        labelH = item.recommendation ? Ui.dp(c, 46) : app && afterglow == null ? Ui.dp(c, 26) : 0;
         labelAlways = "always".equals(labels);
         labelOnFocus = "focus".equals(labels);
         radius = Ui.dp(c, 10);
@@ -68,7 +68,7 @@ final class Tile extends View {
         setFocusable(true);
         setClickable(true);
         setLongClickable(true);
-        setContentDescription(title);
+        setContentDescription(item.recommendation ? title + ", " + item.subtitle : title);
     }
 
     void setMoving(boolean on) {
@@ -113,7 +113,13 @@ final class Tile extends View {
         if (afterglow != null) {
             afterglow.draw(canvas, icon, cardW, cardH);
         } else if (banner != null) {
-            banner.setBounds(0, 0, cardW, cardH);
+            if (item.recommendation && banner.getIntrinsicWidth() > 0 && banner.getIntrinsicHeight() > 0) {
+                float scale = Math.min(cardW / (float) banner.getIntrinsicWidth(), cardH / (float) banner.getIntrinsicHeight());
+                int width = Math.round(banner.getIntrinsicWidth() * scale);
+                int height = Math.round(banner.getIntrinsicHeight() * scale);
+                int left = (cardW - width) / 2, top = (cardH - height) / 2;
+                banner.setBounds(left, top, left + width, top + height);
+            } else banner.setBounds(0, 0, cardW, cardH);
             banner.draw(canvas);
         } else if (icon != null) {
             int size = cardH * 46 / 100;
@@ -125,6 +131,10 @@ final class Tile extends View {
             drawLine(canvas, inner, cardW / 2f, cardH / 2f - (inner.ascent() + inner.descent()) / 2);
         }
         if (moving) canvas.drawColor(0x99000000);
+        if (item.recommendation && item.progress > 0) {
+            dot.setColor(ring.getColor());
+            canvas.drawRect(0, cardH - Ui.dp(getContext(), 3), cardW * item.progress / 100f, cardH, dot);
+        }
         canvas.restore();
 
         if (afterglow != null) afterglow.edge(canvas, cardW, cardH, radius);
@@ -139,6 +149,16 @@ final class Tile extends View {
             canvas.drawRoundRect(half, half, cardW - half, cardH - half, radius - half, radius - half, ring);
         }
         if (moving) drawArrows(canvas);
+        if (item.recommendation) {
+            drawLine(canvas, under, cardW / 2f, cardH + Ui.dp(getContext(), 20));
+            under.setTextSize(Ui.dp(getContext(), 10));
+            under.setColor(Ui.MUTED);
+            CharSequence detail = TextUtils.ellipsize(item.subtitle, under, cardW - Ui.dp(getContext(), 8), TextUtils.TruncateAt.END);
+            canvas.drawText(detail, 0, detail.length(), cardW / 2f, cardH + Ui.dp(getContext(), 37), under);
+            under.setTextSize(Ui.dp(getContext(), 13));
+            under.setColor(Ui.TEXT);
+            return;
+        }
         boolean label = banner != null && (labelAlways || labelOnFocus && isFocused());
         if (labelH > 0 && label) {
             drawLine(canvas, under, cardW / 2f, cardH + labelH - Ui.dp(getContext(), 6));

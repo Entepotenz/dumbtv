@@ -67,7 +67,8 @@ no root:
   stops Amazon's telemetry and automatic updates from reaching their servers.
   Everything else, including your streaming apps, works as before.
 - **Replaces the home screen** with [dumbtv home](launcher/README.md): your apps,
-  your inputs and a clock. 62 KB, open source, no internet access, no permissions.
+  your inputs and a clock, with optional recommendations published by your apps.
+  Open source, with no launcher account or analytics.
 - **Leaves your apps alone.** Nothing you watch is removed unless you name it.
 - **Can all be undone** with one command.
 
@@ -140,13 +141,14 @@ and what you lose without it.
 |---|---|---|
 | ![Rows layout](docs/assets/screens/home.png) | ![Grid layout](docs/assets/screens/grid.png) | ![Options](docs/assets/screens/options.png) |
 
-A home screen that shows your apps and your HDMI inputs, and nothing else. Accent
+A home screen that shows your apps and your HDMI inputs. Accent
 colours, tile sizes, rows or a grid, wallpapers, adaptive backgrounds, renaming and
 hiding, all from the remote. HOME lands on it in a fraction of a second.
 
-It is plain Java with no libraries and no internet permission, so it cannot send
-anything anywhere. On Fire OS 7 and 8 it asks for no permissions at all. It works
-on its own, without the rest of dumbtv:
+It is plain Java with no libraries. Optional app recommendations use read-only TV
+listings and internet access for artwork, with no launcher account or analytics.
+This feature is off by default and depends on what the device and apps publish.
+It works on its own, without the rest of dumbtv:
 
 ```sh
 adb connect <tv-ip>:5555

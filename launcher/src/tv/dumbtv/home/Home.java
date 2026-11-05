@@ -8,6 +8,7 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Color;
@@ -23,6 +24,7 @@ import android.text.SpannableString;
 import android.text.Spanned;
 import android.text.format.DateFormat;
 import android.text.style.RelativeSizeSpan;
+import android.util.LruCache;
 import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.View;
@@ -41,9 +43,11 @@ import java.io.File;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -59,6 +63,29 @@ public final class Home extends Activity {
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final ExecutorService io = Executors.newSingleThreadExecutor();
     private final ExecutorService colorIo = Executors.newSingleThreadExecutor();
+    private final ExecutorService recommendationIo = Executors.newSingleThreadExecutor();
+    private final ExecutorService artworkIo = Executors.newSingleThreadExecutor();
+    private final List<Row> recommendationRows = new ArrayList<>();
+    private LinearLayout recommendationColumn;
+    private TextView recommendationStatus;
+    private volatile int recommendationGeneration;
+    private boolean listingsRequested;
+    private volatile boolean recommendationArtEnabled;
+    private final LruCache<String, Item> recommendationArt = new LruCache<String, Item>(8192) {
+        @Override
+        protected int sizeOf(String key, Item item) {
+            return item.banner == null ? 1
+                    : Math.max(1, item.banner.getIntrinsicWidth() * item.banner.getIntrinsicHeight() * 4 / 1024);
+        }
+
+        @Override
+        protected void entryRemoved(boolean evicted, String key, Item oldItem, Item newItem) {
+            if (oldItem != newItem) {
+                oldItem.banner = null;
+                oldItem.artRequested = false;
+            }
+        }
+    };
     private final List<TextView> chips = new ArrayList<>();
     private Config cfg;
     private TvInputManager tv;
@@ -165,11 +192,15 @@ public final class Home extends Activity {
 
         /** Whichever container currently holds the tiles, following Options › Layout. */
         ViewGroup tiles() {
-            return "grid".equals(cfg.get(Config.LAYOUT)) ? grid : strip;
+            return gridMode() ? grid : strip;
+        }
+
+        boolean gridMode() {
+            return !kind.startsWith(Recommendations.KIND) && "grid".equals(cfg.get(Config.LAYOUT));
         }
 
         void setVisible(boolean on) {
-            boolean gridMode = "grid".equals(cfg.get(Config.LAYOUT));
+            boolean gridMode = gridMode();
             title.setVisibility(on ? View.VISIBLE : View.GONE);
             scroll.setVisibility(on && !gridMode ? View.VISIBLE : View.GONE);
             grid.setVisibility(on && gridMode ? View.VISIBLE : View.GONE);
@@ -234,6 +265,7 @@ public final class Home extends Activity {
         if (cfg.version() != applied) apply();
         else background();
         refreshRecent();
+        loadRecommendations();
         IntentFilter f = new IntentFilter(Intent.ACTION_TIME_TICK);
         f.addAction(Intent.ACTION_TIME_CHANGED);
         f.addAction(Intent.ACTION_TIMEZONE_CHANGED);
@@ -250,6 +282,9 @@ public final class Home extends Activity {
     protected void onPause() {
         super.onPause();
         resumed = false;
+        recommendationGeneration++;
+        recommendationArtEnabled = false;
+        recommendationArt.evictAll();
         stopColorAnimation();
         targetColor = 0;
         unregisterReceiver(time);
@@ -262,6 +297,8 @@ public final class Home extends Activity {
         if (tv != null) tv.unregisterCallback(inputWatch);
         io.shutdownNow();
         colorIo.shutdownNow();
+        recommendationIo.shutdownNow();
+        artworkIo.shutdownNow();
         super.onDestroy();
     }
 
@@ -334,7 +371,7 @@ public final class Home extends Activity {
         }
         if (code == KeyEvent.KEYCODE_MENU) {
             View f = getCurrentFocus();
-            if (f instanceof Tile) menu((Tile) f);
+            if (f instanceof Tile && !((Tile) f).item.recommendation) menu((Tile) f);
             else startActivity(new Intent(this, Options.class));
             return true;
         }
@@ -364,7 +401,11 @@ public final class Home extends Activity {
      */
     private List<int[]> rowBlocks(View content) {
         List<int[]> rows = new ArrayList<>();
-        for (Row row : new Row[] {apps, inputs}) {
+        List<Row> allRows = new ArrayList<>();
+        allRows.add(apps);
+        allRows.add(inputs);
+        allRows.addAll(recommendationRows);
+        for (Row row : allRows) {
             if (row.scroll.getVisibility() == View.VISIBLE) {
                 rows.add(new int[] {topIn(row.title, content), topIn(row.scroll, content) + row.scroll.getHeight()});
             } else if (row.grid.getVisibility() == View.VISIBLE) {
@@ -467,6 +508,7 @@ public final class Home extends Activity {
         scroll.setVerticalScrollBarEnabled(false);
         scroll.setOverScrollMode(View.OVER_SCROLL_NEVER);
         scroll.setClipChildren(false);
+        scroll.setOnScrollChangeListener((view, left, top, oldLeft, oldTop) -> loadVisibleRecommendationArt());
         root.addView(scroll, new FrameLayout.LayoutParams(MATCH, MATCH));
 
         LinearLayout column = new LinearLayout(this) {
@@ -580,6 +622,15 @@ public final class Home extends Activity {
 
         apps = new Row(Catalog.APPS, "Apps", column);
         inputs = new Row(Catalog.INPUTS, "Inputs", column);
+        recommendationColumn = new LinearLayout(this);
+        recommendationColumn.setOrientation(LinearLayout.VERTICAL);
+        recommendationColumn.setClipChildren(false);
+        column.addView(recommendationColumn, new LinearLayout.LayoutParams(MATCH, WRAP));
+        recommendationStatus = Ui.text(this, 14, Ui.MUTED, Ui.MEDIUM);
+        recommendationStatus.setPadding(dp(56), dp(20), dp(56), dp(20));
+        recommendationStatus.setVisibility(View.GONE);
+        recommendationStatus.setOnClickListener(view -> requestListings());
+        column.addView(recommendationStatus, new LinearLayout.LayoutParams(MATCH, WRAP));
         return root;
     }
 
@@ -666,6 +717,7 @@ public final class Home extends Activity {
         }
         meter.setVisibility("on".equals(cfg.get(Config.MEMORY)) ? View.VISIBLE : View.GONE);
         meter.setAccent(accent);
+        Ui.focusStyle(recommendationStatus, accent, 0x14FFFFFF, dp(8));
         render(apps);
         render(inputs);
         background();
@@ -691,6 +743,7 @@ public final class Home extends Activity {
                 }
                 apps.all = list;
                 render(apps);
+                if (resumed) loadRecommendations();
             });
         });
     }
@@ -719,12 +772,114 @@ public final class Home extends Activity {
         });
     }
 
+    private boolean recommendationsEnabled() {
+        return "on".equals(cfg.get(Config.RECOMMENDATIONS));
+    }
+
+    private void requestListings() {
+        if (!Recommendations.available(this)) return;
+        if (checkSelfPermission(Recommendations.PERMISSION) == PackageManager.PERMISSION_GRANTED) return;
+        listingsRequested = true;
+        try {
+            requestPermissions(new String[] {Recommendations.PERMISSION}, 7);
+        } catch (RuntimeException ignored) {
+            recommendationStatus.setText("TV listings permission unavailable");
+        }
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grants) {
+        super.onRequestPermissionsResult(requestCode, permissions, grants);
+        if (requestCode == 7 && resumed) loadRecommendations();
+    }
+
+    private void loadRecommendations() {
+        int generation = ++recommendationGeneration;
+        recommendationArtEnabled = recommendationsEnabled() && resumed;
+        if (!recommendationsEnabled()) {
+            recommendationArt.evictAll();
+            recommendationRows.clear();
+            recommendationColumn.removeAllViews();
+            recommendationStatus.setVisibility(View.GONE);
+            return;
+        }
+        if (!listingsRequested) requestListings();
+        Set<String> allowed = new HashSet<>();
+        for (Item item : Catalog.visible(cfg, Catalog.APPS, apps.all)) allowed.add(item.id);
+        recommendationIo.execute(() -> {
+            Recommendations.Result result = Recommendations.load(this, allowed);
+            ui.post(() -> {
+                if (isDestroyed() || !resumed || generation != recommendationGeneration) return;
+                String focusedId = null;
+                View focused = getCurrentFocus();
+                if (focused instanceof Tile && ((Tile) focused).item.recommendation) {
+                    focusedId = ((Tile) focused).item.id;
+                }
+                recommendationArt.evictAll();
+                recommendationRows.clear();
+                recommendationColumn.removeAllViews();
+                Tile restore = null;
+                for (Recommendations.Channel channel : result.channels) {
+                    Row row = new Row(Recommendations.KIND + ":" + channel.id, channel.title, recommendationColumn);
+                    row.all = channel.items;
+                    recommendationRows.add(row);
+                    render(row);
+                    row.scroll.setOnScrollChangeListener((view, left, top, oldLeft, oldTop) -> loadVisibleRecommendationArt());
+                    for (int index = 0; index < row.strip.getChildCount(); index++) {
+                        Tile tile = (Tile) row.strip.getChildAt(index);
+                        if (tile.item.id.equals(focusedId)) restore = tile;
+                    }
+                }
+                boolean empty = recommendationRows.isEmpty();
+                recommendationStatus.setText(result.status);
+                recommendationStatus.setVisibility(empty ? View.VISIBLE : View.GONE);
+                boolean needsPermission = Recommendations.available(this)
+                        && checkSelfPermission(Recommendations.PERMISSION) != PackageManager.PERMISSION_GRANTED;
+                recommendationStatus.setFocusable(empty && needsPermission && !locked());
+                recommendationStatus.setClickable(empty && needsPermission && !locked());
+                if (restore != null) restore.requestFocus();
+                else if (focusedId != null) focusFirst();
+                recommendationColumn.post(this::loadVisibleRecommendationArt);
+            });
+        });
+    }
+
+    private void loadVisibleRecommendationArt() {
+        if (!resumed || !recommendationsEnabled()) return;
+        Rect visible = new Rect();
+        for (Row row : recommendationRows) {
+            for (int index = 0; index < row.strip.getChildCount(); index++) {
+                Tile tile = (Tile) row.strip.getChildAt(index);
+                Item item = tile.item;
+                if (item.artRequested || item.banner != null || !tile.getGlobalVisibleRect(visible)) continue;
+                item.artRequested = true;
+                int generation = recommendationGeneration;
+                artworkIo.execute(() -> {
+                    if (!recommendationArtEnabled || generation != recommendationGeneration) {
+                        item.artRequested = false;
+                        return;
+                    }
+                    Recommendations.art(this, item);
+                    ui.post(() -> {
+                        if (isDestroyed() || !recommendationArtEnabled || generation != recommendationGeneration) {
+                            item.banner = null;
+                            item.artRequested = false;
+                            return;
+                        }
+                        if (item.banner != null) recommendationArt.put(item.id, item);
+                        tile.invalidate();
+                    });
+                });
+            }
+        }
+    }
+
     private void render(Row row) {
         if (moving != null && moving.kind.equals(row.kind)) stopMoving();
         View focused = getCurrentFocus();
         String keep = focused instanceof Tile && ((Tile) focused).kind.equals(row.kind)
                 ? ((Tile) focused).item.id : null;
-        boolean gridMode = "grid".equals(cfg.get(Config.LAYOUT));
+        boolean gridMode = row.gridMode();
         ViewGroup target = gridMode ? row.grid : row.strip;
         row.strip.removeAllViews();
         row.grid.removeAllViews();
@@ -733,16 +888,33 @@ public final class Home extends Activity {
         List<Item> shown = enabled ? Catalog.visible(cfg, row.kind, row.all, recentFor(row.kind))
                 : new ArrayList<>();
         int[] size = cardSize();
-        int w = size[0], h = Catalog.APPS.equals(row.kind) ? size[1] : Math.round(size[1] * 0.56f);
+        boolean recommendation = row.kind.startsWith(Recommendations.KIND);
+        int w = size[0], h = Catalog.APPS.equals(row.kind) || recommendation ? size[1] : Math.round(size[1] * 0.56f);
         String labels = cfg.get(Config.LABELS);
         int accent = cfg.accent();
         int index = 0, restore = -1;
         for (Item it : shown) {
             Tile t = new Tile(this, it, row.kind, Catalog.label(cfg, it), w, h, labels, accent);
-            t.setOnClickListener(v -> open((Tile) v));
+            t.setOnClickListener(v -> {
+                if (!it.recommendation) {
+                    open((Tile) v);
+                    return;
+                }
+                try {
+                    Recent.opened(this, it.owner);
+                    startActivity(it.intent);
+                } catch (RuntimeException ignored) {
+                    Toast.makeText(this, "Content unavailable in this app", Toast.LENGTH_SHORT).show();
+                }
+            });
             t.setOnFocusChangeListener((v, has) -> {
                 if (has) {
                     Tile tile = (Tile) v;
+                    if (tile.item.recommendation) {
+                        focusBackground(null);
+                        loadVisibleRecommendationArt();
+                        return;
+                    }
                     lastFocusedKind = tile.kind;
                     if (Catalog.APPS.equals(tile.kind)) {
                         lastAppId = tile.item.id;
@@ -753,7 +925,7 @@ public final class Home extends Activity {
                 }
             });
             t.setOnLongClickListener(v -> {
-                if (!locked()) menu((Tile) v);
+                if (!locked() && !it.recommendation) menu((Tile) v);
                 return true;
             });
             if (gridMode) {

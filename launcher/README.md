@@ -1,19 +1,20 @@
 # dumbtv home
 
-A home screen for Fire TV that does one job: show your apps and your HDMI inputs.
+A home screen for Fire TV with apps, HDMI inputs and optional app recommendations.
 
 <p align="center">
   <img src="../docs/assets/screens/home.png" alt="dumbtv home: a clock, an Apps row and an Inputs row" width="720">
 </p>
 
-- **62 KB.** Plain Java and Android views. No AndroidX, Kotlin, Compose, Play
+- Plain Java and Android views. No AndroidX, Kotlin, Compose, Play
   Services or any other library.
-- **No network.** There is no `INTERNET` permission, so Android will not let it
-  open a connection.
-- **No permissions on Fire OS 7 and 8.** It declares three (usage access, task
-  order, boot completed), each limited to Android 8.1 and earlier, for the Fire OS 6
-  Keeper below. Check: `aapt2 dump permissions dumbtv-home.apk`.
-- **No ads, no recommended rows, no account, no analytics, no update checks.**
+- **Optional recommendations.** Read-only TV listings permission lets it display
+  content published by installed apps. Internet permission is used only to load
+  recommendation artwork; the feature is off by default.
+- Three other permissions (usage access, task order, boot completed) are limited
+  to Android 8.1 and earlier, for the Fire OS 6 Keeper below.
+- **No injected ads, no account, no analytics, no update checks.** Recommendation
+  contents are supplied by the apps, not curated or filtered for advertising.
 - About 60–70 MB of memory with the home screen showing, about 37 MB while an app
   plays (measured on a Fire TV Edition television with 1.4 GB of RAM).
 
@@ -73,6 +74,7 @@ you open an app. On Fire OS 7 and 8 the Settings button opens Amazon's settings 
 | Image dim, wallpaper rotation | for image backgrounds |
 | Child lock | off, on: hides Options and Settings and turns off Hold OK and ☰ Menu on tiles, so the home screen only opens apps and inputs (see below) |
 | App tile style | original (default), Afterglow: uppercase names inside the tile, a brand-color fade into black, a grayscale installed app icon in the corner, and a thin focus border |
+| App recommendations | hidden (default), shown: Continue watching and app channels below the apps and inputs |
 
 Below them: Next wallpaper, which apps and inputs appear on the home screen, a
 reset for order, names and hidden tiles, and **Open Amazon's home screen**. Apps
@@ -86,6 +88,39 @@ Corner icons come from installed apps, so no brand-logo files or downloads are
 needed. Missing icons still leave the name visible. Switching back to Original
 restores the normal banners and App names behavior. Background and layout remain
 separate choices.
+
+## App recommendations
+
+Enable **Options > App recommendations > Shown** and allow TV listings access
+if the device offers that permission dialog. If access is denied, the empty-state
+row can be selected to request it again. Turn the option off to hide the rows and
+stop new artwork requests. An artwork request already in progress may finish.
+
+The launcher reads Android's local TV provider (Android 8 or later). It shows
+Watch Next entries first, followed by app channels, with cover, title, episode
+details and playback progress where supplied. OK opens the app's own content
+intent. Hidden apps are excluded. Content rows stay horizontal in grid mode too.
+They refresh whenever you return home; publishing and freshness remain the source
+app's responsibility. Move, Rename and Hide apply to apps and inputs, not these
+source-managed content cards.
+
+Jellyfin Android TV publishes next episodes, latest media and Watch Next through
+this API when its TV home-screen integration is enabled and the device supports
+it. The existing Jellyfin login is used by Jellyfin, not copied into the launcher.
+Prime Video only appears if its installed Fire TV version publishes readable
+entries through the same provider. Amazon's own home screen may use private
+sources instead; installing the app alone does not guarantee recommendations.
+Fire OS 8's Android version is new enough, but individual builds may omit or
+restrict the TV provider. Unavailable providers, denied access and empty results
+are displayed as status rows; apps and inputs continue to work.
+
+Only entries that the provider permits this app to read are shown. There is no
+root, private database access, scraping, direct Jellyfin server connection or
+Amazon account integration. Remote artwork requests contact the hosts supplied
+by the source apps, which can observe those requests. Locally provided Jellyfin
+artwork is read through Jellyfin's content provider. Images are size-limited,
+loaded off the UI thread for visible tiles, and cached within an 8 MiB budget.
+The TV integration and deep links still need validation on the target Fire TV.
 
 | Grid layout | Adaptive background | Adaptive tint |
 |---|---|---|
@@ -157,6 +192,8 @@ dim=40
 rotate=off
 # off on
 lock=off
+# off on; needs readable TV-provider data and TV listings access
+recommendations=off
 apps.order=com.amazon.firetv.youtube,org.videolan.vlc
 apps.hide=org.videolan.vlc
 apps.show=com.amazon.venezia
